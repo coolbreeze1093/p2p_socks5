@@ -25,8 +25,7 @@ public:
     // ---------- offerer（本地 SOCKS5 端）----------
     // 创建 PeerConnection + DataChannel，等待候选收集完成，
     // 返回 base64 编码的 OFFER SDP；失败(超时)返回空串。
-    // with_rd=true 时额外创建远程桌面通道(label="rd")
-    std::string createOffer(int timeout_sec = 30, bool with_rd = false);
+    std::string createOffer(int timeout_sec = 30);
 
     // 设置对端返回的 base64 ANSWER，成功返回 true
     bool acceptAnswer(const std::string &answer_b64);
@@ -43,8 +42,6 @@ public:
 
     // P2P 数据通道(label="data")收到的二进制数据
     void onData(BinaryCallback cb) { data_callback_ = std::move(cb); }
-    // 远程桌面通道(label="rd")收到的二进制数据
-    void onRdData(BinaryCallback cb) { rd_data_callback_ = std::move(cb); }
     // 任一 DataChannel 打开，可以开始传输（只通知一次）
     void onConnected(StateCallback cb) { connected_callback_ = std::move(cb); }
     // 连接失败或关闭
@@ -58,12 +55,11 @@ public:
 private:
     std::string waitLocalSdp(int timeout_sec);
     void bindPeerConnection();
-    void bindDataChannel(std::shared_ptr<rtc::DataChannel> dc, bool is_rd);
+    void bindDataChannel(std::shared_ptr<rtc::DataChannel> dc);
 
     rtc::Configuration config_;
     std::shared_ptr<rtc::PeerConnection> pc_;
     std::shared_ptr<rtc::DataChannel> dc_;
-    std::shared_ptr<rtc::DataChannel> rd_dc_;
 
     BinaryCallback data_callback_;
     BinaryCallback rd_data_callback_;

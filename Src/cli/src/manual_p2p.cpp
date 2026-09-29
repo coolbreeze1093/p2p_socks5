@@ -1,5 +1,4 @@
 #include "manual_p2p.h"
-#include "rd_protocol.h"
 #include <plog/Log.h>
 #include <algorithm>
 #include <atomic>
@@ -16,7 +15,7 @@ void ManualP2P::init(const rtc::Configuration &config)
     config_ = config;
 }
 
-std::string ManualP2P::createOffer(int timeout_sec, bool with_rd)
+std::string ManualP2P::createOffer(int timeout_sec)
 {
     try
     {
@@ -24,14 +23,8 @@ std::string ManualP2P::createOffer(int timeout_sec, bool with_rd)
         bindPeerConnection();
 
         dc_ = pc_->createDataChannel("data");
-        bindDataChannel(dc_, false);
+        bindDataChannel(dc_);
 
-        // 远程桌面走独立通道，与代理业务互不影响
-        if (with_rd)
-        {
-            rd_dc_ = pc_->createDataChannel(rd::kChannelLabel);
-            bindDataChannel(rd_dc_, true);
-        }
     }
     catch (const std::exception &e)
     {
@@ -70,16 +63,9 @@ std::string ManualP2P::acceptOffer(const std::string &offer_b64, int timeout_sec
                            {
                                const std::string label = dc->label();
                                PLOG_INFO << "DataChannel received: " << label;
-                               if (label == rd::kChannelLabel)
-                               {
-                                   rd_dc_ = dc;
-                                   bindDataChannel(rd_dc_, true);
-                               }
-                               else
-                               {
                                    dc_ = dc;
-                                   bindDataChannel(dc_, false);
-                               } });
+                                   bindDataChannel(dc_);
+                               });
 
         std::string sdp = base64Decode(offer_b64);
         pc_->setRemoteDescription(rtc::Description(sdp, "offer"));
@@ -110,11 +96,10 @@ void ManualP2P::bindPeerConnection()
                           { PLOG_INFO << "Local candidate: " << candidate; });
 }
 
-void ManualP2P::bindDataChannel(std::shared_ptr<rtc::DataChannel> dc, bool is_rd)
+void ManualP2P::bindDataChannel(std::shared_ptr<rtc::DataChannel> dc)
 {
-    dc->onOpen([this, is_rd]()
-               { PLOG_INFO << "DataChannel open"
-                          << (is_rd ? " (rd)" : "");
+    dc->onOpen([this]()
+               { PLOG_INFO << "DataChannel open";
                  // 任一通道首次打开即视为可用（两条通道几乎同时打开，只通知一次）
                  if (!connected_notified_.exchange(true) && connected_callback_)
                      connected_callback_(); });
@@ -128,9 +113,9 @@ void ManualP2P::bindDataChannel(std::shared_ptr<rtc::DataChannel> dc, bool is_rd
                 { PLOG_ERROR << "DataChannel error: " << message; });
 
     dc->onMessage(
-        [this, is_rd](rtc::binary message)
+        [this](rtc::binary message)
         {
-            auto &cb = is_rd ? rd_data_callback_ : data_callback_;
+            auto &cb = data_callback_;
             if (cb)
                 cb(reinterpret_cast<const uint8_t *>(message.data()), message.size());
             else
@@ -200,13 +185,13 @@ void ManualP2P::sendRd(const uint8_t *data, size_t len)
 {
     try
     {
-        if (rd_dc_ && rd_dc_->isOpen())
+        if (dc_ && dc_->isOpen())
         {
-            rd_dc_->send(reinterpret_cast<const std::byte *>(data), len);
+            dc_->send(reinterpret_cast<const std::byte *>(data), len);
         }
         else
         {
-            PLOG_WARNING << "sendRd dropped: rd channel not open (" << len << " bytes)";
+            PLOG_WARNING << "sendRd dropped: data channel not open (" << len << " bytes)";
         }
     }
     catch (const std::exception &e)
@@ -219,8 +204,6 @@ void ManualP2P::close()
 {
     try
     {
-        if (rd_dc_)
-            rd_dc_->close();
         if (dc_)
             dc_->close();
         if (pc_)

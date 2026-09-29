@@ -24,13 +24,9 @@
 #include "crash_dump.h"
 #include "is_std_in_terminal.h"
 #include "manual_p2p.h"
-#include "rd_protocol.h"
 #include "rtc_logger.h"
 #include "session_mux.h"
 #include "tunnel_session.h"
-#ifdef _WIN32
-#include "rd_server.h"
-#endif
 
 namespace
 {
@@ -58,8 +54,6 @@ struct Options
     std::string answer_file; // ANSWER 同时写入该文件
     int wait_sec = kDefaultWaitSec;
     rtc::LogLevel log_level = rtc::LogLevel::Info;
-
-    bool rd = false; // 允许远程桌面被控
 };
 
 enum class ParseResult
@@ -88,8 +82,6 @@ void printUsage(std::FILE *out)
                  "  -S, --stun <host[:port]> STUN server, required on BOTH sides across NAT\n"
                  "                           (default: none, host candidates only)\n"
                  "  -t, --threads <n>        asio IO thread count (default %d)\n"
-                 "      --rd                 allow remote desktop control of this machine\n"
-                 "                           (client must also run with --rd)\n"
                  "      --offer-file <path>  poll this file for the OFFER (instead of stdin)\n"
                  "      --answer-file <path> also write the ANSWER to this file\n"
                  "      --wait <sec>         timeout in seconds when waiting for the offer\n"
@@ -257,10 +249,6 @@ ParseResult parseArgs(int argc, char *argv[], Options &opts, std::string &error)
                 return ParseResult::Error;
             }
         }
-        else if (arg == "--rd")
-        {
-            opts.rd = true;
-        }
         else if (arg == "--offer-file")
         {
             const char *v = value("--offer-file");
@@ -366,9 +354,7 @@ int main(int argc, char *argv[])
     std::signal(SIGTERM, signal_handler);
 
     PLOG_INFO << kProgramName << " " << kVersion << " start";
-#ifdef _WIN32
-    PLOG_INFO << "remote desktop: " << (opts.rd ? "allowed (--rd)" : "disabled");
-#endif
+
     PLOG_INFO << "stun: " << (opts.stun_host.empty() ? "<none, host candidates only>"
                                                      : opts.stun_host + ":" + std::to_string(opts.stun_port));
     if (!opts.offer_file.empty())
@@ -403,9 +389,6 @@ int main(int argc, char *argv[])
     p2psocks::SessionMux mux(1);
     std::mutex tunnels_mutex;
     std::unordered_map<uint32_t, std::shared_ptr<TunnelSession>> tunnel_sessions;
-#ifdef _WIN32
-    RdServer rd_server;
-#endif
 
     ManualP2P p2p;
     rtc::Configuration rtc_config;
@@ -420,29 +403,6 @@ int main(int argc, char *argv[])
             mux.on_p2p_data(1, result->payload, result->len);
         else
             PLOG_ERROR << "unpackMessage failed"; });
-
-#ifdef _WIN32
-    if (opts.rd)
-    {
-        // 被控端：处理 Start/Stop 与鼠标键盘消息，帧经 sendRd 回传
-        rd_server.set_send([&p2p](const uint8_t *data, size_t len)
-                           { p2p.sendRd(data, len); });
-        p2p.onRdData([&rd_server](const uint8_t *data, size_t len)
-                     { rd_server.handle_input(data, len); });
-    }
-    else
-    {
-        // 未开 --rd 时对客户端的 Start 请求明确回错误，控制端窗口给出提示
-        p2p.onRdData([&p2p](const uint8_t *data, size_t len)
-                     {
-            if (len >= 1 && data[0] == rd::Start)
-            {
-                uint8_t code = rd::ErrDisabled;
-                auto m = rd::make_msg(rd::Error, &code, 1);
-                p2p.sendRd(m.data(), m.size());
-            } });
-    }
-#endif
 
     mux.set_send_func([&p2p](uint32_t, const uint8_t *data, size_t len)
                       {
@@ -484,9 +444,7 @@ int main(int argc, char *argv[])
                 t.second->close();
             tunnel_sessions.clear();
         }
-#ifdef _WIN32
-        rd_server.stop();
-#endif
+
         running = false; });
 
     // ---------- 第 1 步：获取 OFFER ----------
@@ -525,9 +483,6 @@ int main(int argc, char *argv[])
 
     PLOG_INFO << "closing ...";
 
-#ifdef _WIN32
-    rd_server.stop();
-#endif
     p2p.close();
 
     {

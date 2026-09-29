@@ -23,7 +23,6 @@ set(COMMON_SOURCES
 add_executable(rtcsocks
     src/main_client.cpp
     src/manual_p2p.cpp
-    src/rd_codec.cpp
     ${CMAKE_SOURCE_DIR}/Src/client/src/socks5.cpp
     ${CMAKE_SOURCE_DIR}/Src/client/src/socks5_session.cpp
     ${CMAKE_SOURCE_DIR}/Src/client/src/udp_session.cpp
@@ -33,19 +32,12 @@ add_executable(rtcsocks
 add_executable(rtcsocks-exit
     src/main_exit.cpp
     src/manual_p2p.cpp
-    src/rd_codec.cpp
-    src/rd_server.cpp
     ${CMAKE_SOURCE_DIR}/Src/server/src/tunnel_session.cpp
     ${CMAKE_SOURCE_DIR}/Src/server/src/tcp_session.cpp
     ${CMAKE_SOURCE_DIR}/Src/server/src/udp_session.cpp
     ${CMAKE_SOURCE_DIR}/Src/server/src/http_session.cpp
     ${COMMON_SOURCES}
 )
-
-# 远程桌面控制端（仅 Windows，Linux 上 main_client 里已拒绝 --rd）
-if(WIN32)
-    target_sources(rtcsocks PRIVATE src/rd_viewer.cpp)
-endif()
 
 if(WIN32)
     # user32/gdi32/gdiplus: 远程桌面(窗口、抓屏、JPEG 编解码、SendInput)

@@ -26,9 +26,6 @@
 #include "rtc_logger.h"
 #include "socks5.h"
 #include "session_mux.h"
-#ifdef _WIN32
-#include "rd_viewer.h"
-#endif
 
 namespace
 {
@@ -58,13 +55,6 @@ struct Options
     std::string answer_file; // 从该文件等待 ANSWER（代替 stdin 粘贴）
     int wait_sec = kDefaultWaitSec;
     rtc::LogLevel log_level = rtc::LogLevel::Info;
-
-    // 远程桌面
-    bool rd = false;        // 开启远程桌面控制端（显示远端画面 + 回传输入）
-    bool no_proxy = false;  // 不启动本地 SOCKS5（与 --rd 组合即"仅远程桌面"）
-    uint16_t rd_fps = 8;    // 请求的抓屏帧率
-    uint16_t rd_quality = 60; // JPEG 质量
-    uint16_t rd_width = 1280; // 抓屏宽度上限（远端按比例缩放）
 };
 
 enum class ParseResult
@@ -96,12 +86,8 @@ void printUsage(std::FILE *out)
                  "  -S, --stun <host[:port]> STUN server, required on BOTH sides across NAT\n"
                  "                           (default: none, host candidates only)\n"
                  "  -t, --threads <n>        asio IO thread count (default %d)\n"
-                 "      --rd                 enable remote desktop (opens a viewer window)\n"
                  "      --no-proxy           do not start the local SOCKS5 proxy\n"
                  "                           (use with --rd for remote-desktop-only mode)\n"
-                 "      --rd-fps <n>         requested capture frame rate, 1-60 (default 8)\n"
-                 "      --rd-quality <n>     jpeg quality, 10-100 (default 60)\n"
-                 "      --rd-width <n>       capture width cap, 320-3840 (default 1280)\n"
                  "      --offer-file <path>  also write the OFFER to this file\n"
                  "      --answer-file <path> poll this file for the ANSWER (instead of stdin)\n"
                  "      --wait <sec>         timeout in seconds when waiting for the answer\n"
@@ -174,19 +160,6 @@ bool parseWaitSec(const std::string &s, int &out)
 
     long v = std::strtol(s.c_str(), nullptr, 10);
     if (v < 1 || v > 86400)
-        return false;
-
-    out = static_cast<int>(v);
-    return true;
-}
-
-bool parseRange(const std::string &s, long lo, long hi, int &out)
-{
-    if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos)
-        return false;
-
-    long v = std::strtol(s.c_str(), nullptr, 10);
-    if (v < lo || v > hi)
         return false;
 
     out = static_cast<int>(v);
@@ -319,50 +292,6 @@ ParseResult parseArgs(int argc, char *argv[], Options &opts, std::string &error)
                 return ParseResult::Error;
             }
         }
-        else if (arg == "--rd")
-        {
-            opts.rd = true;
-        }
-        else if (arg == "--no-proxy")
-        {
-            opts.no_proxy = true;
-        }
-        else if (arg == "--rd-fps")
-        {
-            const char *v = value("--rd-fps");
-            if (!v) return ParseResult::Error;
-            int n = 0;
-            if (!parseRange(v, 1, 60, n))
-            {
-                error = std::string("invalid rd-fps: ") + v + " (expected 1-60)";
-                return ParseResult::Error;
-            }
-            opts.rd_fps = static_cast<uint16_t>(n);
-        }
-        else if (arg == "--rd-quality")
-        {
-            const char *v = value("--rd-quality");
-            if (!v) return ParseResult::Error;
-            int n = 0;
-            if (!parseRange(v, 10, 100, n))
-            {
-                error = std::string("invalid rd-quality: ") + v + " (expected 10-100)";
-                return ParseResult::Error;
-            }
-            opts.rd_quality = static_cast<uint16_t>(n);
-        }
-        else if (arg == "--rd-width")
-        {
-            const char *v = value("--rd-width");
-            if (!v) return ParseResult::Error;
-            int n = 0;
-            if (!parseRange(v, 320, 3840, n))
-            {
-                error = std::string("invalid rd-width: ") + v + " (expected 320-3840)";
-                return ParseResult::Error;
-            }
-            opts.rd_width = static_cast<uint16_t>(n);
-        }
         else if (arg == "--log-level")
         {
             const char *v = value("--log-level");
@@ -435,19 +364,6 @@ int main(int argc, char *argv[])
         break;
     }
 
-    if (opts.no_proxy && !opts.rd)
-    {
-        std::fprintf(stderr, "Error: --no-proxy without --rd does nothing\n\n");
-        return 1;
-    }
-#ifndef _WIN32
-    if (opts.rd)
-    {
-        std::fprintf(stderr, "Error: --rd is only supported on Windows\n\n");
-        return 1;
-    }
-#endif
-
     CrashDump::InstallCrashHandler("");
 
     // PLOG_* 与 rtc 日志共用一条通道: rtc::InitLogger 内部初始化 plog 实例并回调
@@ -459,13 +375,7 @@ int main(int argc, char *argv[])
     std::signal(SIGTERM, signal_handler);
 
     PLOG_INFO << kProgramName << " " << kVersion << " start";
-    PLOG_INFO << "socks5 proxy: " << (opts.no_proxy ? "disabled (--no-proxy)"
-                                                    : "0.0.0.0:" + std::to_string(opts.listen_port));
-    if (opts.rd)
-    {
-        PLOG_INFO << "remote desktop: enabled (fps=" << opts.rd_fps
-                  << " quality=" << opts.rd_quality << " width=" << opts.rd_width << ")";
-    }
+
     PLOG_INFO << "stun: " << (opts.stun_host.empty() ? "<none, host candidates only>"
                                                      : opts.stun_host + ":" + std::to_string(opts.stun_port));
     if (!opts.offer_file.empty())
@@ -499,9 +409,6 @@ int main(int argc, char *argv[])
     // ---------- 业务接线：P2P 数据通道 <-> 会话复用器 <-> 本地 SOCKS5 ----------
     p2psocks::SessionMux mux(1);
     SocksServer socks_server(io, mux);
-#ifdef _WIN32
-    RdViewer rd_viewer;
-#endif
 
     ManualP2P p2p;
     rtc::Configuration rtc_config;
@@ -517,11 +424,6 @@ int main(int argc, char *argv[])
         else
             PLOG_ERROR << "unpackMessage failed"; });
 
-#ifdef _WIN32
-    p2p.onRdData([&rd_viewer](const uint8_t *data, size_t len)
-                 { rd_viewer.on_message(data, len); });
-#endif
-
     mux.set_send_func([&p2p](uint32_t, const uint8_t *data, size_t len)
                       {
         try
@@ -534,55 +436,23 @@ int main(int argc, char *argv[])
             PLOG_ERROR << "packMessage: " << e.what();
         } });
 
-#ifdef _WIN32
-    p2p.onConnected([&]()
-                    {
-        if (!opts.no_proxy)
-        {
-            PLOG_INFO << "P2P connected, socks5 listening on 0.0.0.0:" << opts.listen_port;
-            try
-            {
-                socks_server.start(static_cast<int16_t>(opts.listen_port));
-            }
-            catch (const std::exception &e)
-            {
-                PLOG_ERROR << "socks5 listen failed: " << e.what();
-                running = false;
-            }
-        }
-        else
-        {
-            PLOG_INFO << "P2P connected (proxy disabled)";
-        }
 
-        if (opts.rd)
-        {
-            PLOG_INFO << "opening remote desktop viewer window...";
-            rd_viewer.start([&p2p](const uint8_t *data, size_t len)
-                            { p2p.sendRd(data, len); },
-                            opts.rd_fps, opts.rd_quality, opts.rd_width);
-        } });
-#else
     p2p.onConnected([&]()
                     {
-        if (!opts.no_proxy)
-        {
             PLOG_INFO << "P2P connected, socks5 listening on 0.0.0.0:" << opts.listen_port;
             socks_server.start(static_cast<int16_t>(opts.listen_port));
-        } });
-#endif
+         });
+
 
     p2p.onClosed([&]()
                  {
         PLOG_INFO << "p2p closed";
         socks_server.stop();
-#ifdef _WIN32
-        rd_viewer.stop();
-#endif
+
         running = false; });
 
     // ---------- 第 1 步：生成 OFFER ----------
-    std::string offer_b64 = p2p.createOffer(kGatherTimeoutSec, opts.rd);
+    std::string offer_b64 = p2p.createOffer(kGatherTimeoutSec);
     if (offer_b64.empty())
     {
         PLOG_ERROR << "create offer failed";

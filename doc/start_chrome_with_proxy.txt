@@ -1,2 +1,5 @@
 
 start chrome --user-data-dir="C:\ChromeProxy" --proxy-server="http://127.0.0.1:10801" --new-window
+
+rtcsocks.exe -l 1080 -S stun.miwifi.com:3478
+rtcsocks-exit.exe -S stun.miwifi.com:3478
