@@ -67,7 +67,7 @@ enum class ParseResult
 void printUsage(std::FILE *out)
 {
     std::fprintf(out,
-                 "%s %s -- P2P SOCKS5 proxy + remote desktop, local side\n"
+                 "%s %s -- P2P SOCKS5 proxy, local side\n"
                  "           (manual SDP exchange, no signaling server)\n"
                  "\n"
                  "Usage:\n"
@@ -79,15 +79,12 @@ void printUsage(std::FILE *out)
                  "  2. Paste the ANSWER returned by the exit side back into this program\n"
                  "     (or read it automatically via --answer-file)\n"
                  "  3. Once the P2P link is up, the local SOCKS5 proxy starts listening\n"
-                 "     and/or the remote desktop window opens\n"
                  "\n"
                  "Options:\n"
                  "  -l, --listen <port>      local SOCKS5 listen port (default %u)\n"
                  "  -S, --stun <host[:port]> STUN server, required on BOTH sides across NAT\n"
                  "                           (default: none, host candidates only)\n"
                  "  -t, --threads <n>        asio IO thread count (default %d)\n"
-                 "      --no-proxy           do not start the local SOCKS5 proxy\n"
-                 "                           (use with --rd for remote-desktop-only mode)\n"
                  "      --offer-file <path>  also write the OFFER to this file\n"
                  "      --answer-file <path> poll this file for the ANSWER (instead of stdin)\n"
                  "      --wait <sec>         timeout in seconds when waiting for the answer\n"
@@ -100,7 +97,6 @@ void printUsage(std::FILE *out)
                  "Notes:\n"
                  "  - The exit side is rtcsocks-exit. The SDP is exchanged only once;\n"
                  "    if the connection drops, exchange again.\n"
-                 "  - Remote desktop requires --rd on BOTH sides.\n"
                  "  - There is no password: the SDP itself is the credential, keep it private.\n"
                  "  - Press q in the terminal (or Ctrl+C) to quit.\n",
                  kProgramName, kVersion, kProgramName,

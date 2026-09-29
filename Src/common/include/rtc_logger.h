@@ -76,7 +76,8 @@ public:
         return inst;
     }
 
-    void init(const std::string& filepath) {
+    void init(const std::string& filepath, bool console = false) {
+        console_ = console;
         auto exec_dir = getExecutableDir();
         std::string log_path = exec_dir.string() + "/" + filepath;
         //file_.open(log_path, std::ios::out | std::ios::app);
@@ -157,8 +158,11 @@ private:
         const std::string line = oss.str();
         file_ << line << '\n';
         file_.flush();
-        std::cout << line << '\n';
-        std::cout.flush();
+        if (console_)
+        {
+            std::cout << line << '\n';
+            std::cout.flush();
+        }
     }
 
     moodycamel::ConcurrentQueue<Entry> queue_;
@@ -168,6 +172,7 @@ private:
     std::atomic<size_t> dropped_{0};
     std::condition_variable cv_;
     std::mutex cv_mutex_;
+    bool console_{false};
 };
 
 // 兼容原回调签名
