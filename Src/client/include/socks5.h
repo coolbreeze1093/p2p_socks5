@@ -1,4 +1,4 @@
-// local.cpp —— 本地端 (Ingress)
+﻿// local.cpp —— 本地端 (Ingress)
 // 职责：接收浏览器 SOCKS5 连接 -> 解析目标host:port -> 通过 SessionMux
 //       (最终调用你的P2P模块 send()) 把请求发给远端 -> 远端连接成功后
 //       双向转发数据。
@@ -14,7 +14,7 @@
 #include <memory>
 #include "session_mux.h"
 #include "session_id_generator.h"
-#include "tcp_session.h"
+#include "socks5_session.h"
 #include <mutex>
 
 using asio::ip::tcp;

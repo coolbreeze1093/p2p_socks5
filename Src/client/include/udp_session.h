@@ -1,5 +1,6 @@
 #include <asio.hpp>
 #include <deque>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include "session_mux.h"
@@ -16,7 +17,9 @@ public:
 
     void close();
 
-    bool start();
+    // 异步打开 UDP 套接字；open+bind 完成后回调 on_ready(success, 绑定端口)。
+    // 不能在 start() 返回后立刻取端口，套接字此时可能尚未打开（原实现的竞态）。
+    void start(std::function<void(bool success, int port)> on_ready);
 
     void revP2pData(const uint8_t *d, size_t n);
 

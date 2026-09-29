@@ -76,7 +76,7 @@ endif()
 set(NO_EXAMPLES ON CACHE BOOL "" FORCE)          # 不编译示例
 set(NO_TESTS ON CACHE BOOL "" FORCE)             # 不编译测试
 set(NO_WEBSOCKET OFF CACHE BOOL "" FORCE)        # 是否禁用 WebSocket 支持
-set(NO_MEDIA ON CACHE BOOL "" FORCE)            # 是否禁用媒体传输(SRTP)支持
+set(NO_MEDIA OFF CACHE BOOL "" FORCE)            # 是否禁用媒体传输(SRTP)支持
 set(ENABLE_OPENSSL ON CACHE BOOL "" FORCE)                # 是否启用 OpenSSL
 set(USE_GNUTLS OFF CACHE BOOL "" FORCE)          # 用 GnuTLS 而不是 OpenSSL
 set(USE_NICE OFF CACHE BOOL "" FORCE)            # 用 libnice 而不是内置的 libjuice 做 ICE
@@ -84,6 +84,11 @@ set(USE_MBEDTLS OFF CACHE BOOL "" FORCE)         # 用 mbedTLS
 set(PREFER_SYSTEM_LIB OFF CACHE BOOL "" FORCE)   # 是否优先用系统已装的依赖库（而不是自己 fetch）
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)   # 静态库还是动态库
 set(LIBSRTP_TEST_APPS OFF CACHE BOOL "" FORCE)   # 是否编译测试应用
+set(WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)            # 是否将警告作为错误处理
+
+if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-Wno-error=format -Wno-error=format-extra-args)
+endif()
 
 FetchContent_Declare(
     libdatachannel
@@ -109,3 +114,4 @@ endif()
 
 add_subdirectory(Src/client)
 add_subdirectory(Src/server)
+add_subdirectory(Src/cli)

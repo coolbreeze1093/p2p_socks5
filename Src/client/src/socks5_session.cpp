@@ -1,9 +1,20 @@
-#include "tcp_session.h"
+﻿#include "socks5_session.h"
 #include <plog/Log.h>
 #include <asio.hpp>
 #include <sstream>
 #include <deque>
 #include <memory>
+
+// 2026-09 修复记录（对能正常工作的客户端行为保持一致）：
+// 1. SOCKS5 握手解析：原 handle_* 系列从"当前 chunk 起始的绝对偏移"读字段，
+//    且 consume_pending 的消费计数与真实帧长不一致，只有当客户端问候包恰好
+//    只带 1 个认证方法（NMETHODS=1 恰与 CONNECT 命令值相同）且问候/请求
+//    分开发送时才能碰巧工作；curl 等带 2 个认证方法的客户端会被误判为
+//    "invalid command" 而拒绝(0x07)。现改为滚动偏移 + 跨包缓冲
+//    (socks_pending_)，严格按 RFC 1928 帧长消费。
+// 2. UDP 会话 stream id：UdpSession 收发必须使用本次 SYN 的
+//    session_->stream_id()，而不是 SOCKS5 会话计数器 id，否则对端按
+//    stream_id 分发时找不到会话，UDP 数据被静默丢弃。
 
 using asio::ip::tcp;
 using namespace p2psocks;
@@ -186,130 +197,204 @@ void Socks5Session::process_data(const uint8_t *data, size_t len)
         }
         return;
     }
+    else if (phase_ == Phase::WaitHttpRequestHeaders)
+    {
+        // 明文 http：数据原样喂给 http 解析器并暂存，连接成功后转发
+        http_request_parser_.feed(reinterpret_cast<const char *>(data), len);
+        pending_buf_.push_back({data, data + len});
+    }
     else
     {
-        consume_pending(data, len);
+        // SOCKS5 握手：一步可能分多个 TCP 段到达，也可能多步挤在一个段里。
+        // 先拼接到未消费缓冲，再滚动消费，剩余字节留待下一包。
+        socks_pending_.insert(socks_pending_.end(), data, data + len);
+        size_t consumed = consume_pending(socks_pending_.data(), socks_pending_.size());
+        socks_pending_.erase(socks_pending_.begin(), socks_pending_.begin() + consumed);
+
+        if (phase_ == Phase::WaitHttpRequestHeaders && !socks_pending_.empty())
+        {
+            // 首字节不是 0x05：明文 http，整段（未消费）转交 http 解析器
+            http_request_parser_.feed(reinterpret_cast<const char *>(socks_pending_.data()), socks_pending_.size());
+            pending_buf_.push_back(socks_pending_);
+            socks_pending_.clear();
+        }
     }
 }
 
-void Socks5Session::consume_pending(const uint8_t *data, size_t len)
+size_t Socks5Session::consume_pending(const uint8_t *data, size_t len)
 {
-    // 循环消费：每处理完一个定长阶段就可能进入下一个定长阶段，直到数据不够或进入变长(http)阶段
-    size_t consumed_len = 0;
+    // 滚动消费：每处理完一个定长阶段就前进 offset，直到数据不够或进入下一个大阶段
+    size_t offset = 0;
     while (phase_ != Phase::Closed &&
            phase_ != Phase::WaitHttpRequestHeaders &&
            phase_ != Phase::Connecting &&
            phase_ != Phase::Connected)
     {
-        if(consumed_len >= len)
+        if (offset >= len)
         {
             break;
         }
+        const uint8_t *p = data + offset;
+        size_t remaining = len - offset;
+        size_t consumed = 0;
         switch (phase_)
         {
         case Phase::WaitGreetingVersion:
-            consumed_len += handle_greeting_version(data, len);
+            consumed = handle_greeting_version(p, remaining);
             break;
         case Phase::WaitSocksMethods:
-            consumed_len += handle_socks_methods(data, len);
+            consumed = handle_socks_methods(p, remaining);
             break;
         case Phase::WaitSocksTCP:
         case Phase::WaitSocksUDP:
-            consumed_len += handle_socks_tcp_udp(data, len);
+            consumed = handle_socks_tcp_udp(p, remaining);
             break;
         case Phase::WaitSocksIpv4:
-            consumed_len += handle_socks_ipv4(data, len);
+            consumed = handle_socks_ipv4(p, remaining);
             break;
         case Phase::WaitSocksDomain:
-            consumed_len += handle_socks_domain(data, len);
+            consumed = handle_socks_domain(p, remaining);
             break;
         default:
-            return;
+            return offset;
         }
+
         if (phase_ == Phase::Closed)
         {
             tcp_socket_->close();
-            return;
+            return len; // 已关闭，剩余字节全部丢弃
         }
+
+        if (consumed == 0)
+        {
+            // 数据不足，等待下一包
+            break;
+        }
+        offset += consumed;
     }
 
-    // 如果转入了 HTTP 请求头阶段，把 pending_ 里剩余（本次判定为明文http的前2字节等）残留字节喂给 parser
-    if (phase_ == Phase::WaitHttpRequestHeaders)
-    {
-        http_request_parser_.feed(reinterpret_cast<const char *>(data), len);
-        pending_buf_.push_back({data, data + len});
-    }
+    return offset;
 }
 
 size_t Socks5Session::handle_greeting_version(const uint8_t *data, size_t len)
 {
+    // VER(1) + NMETHODS(1)
+    if (len < 2)
+    {
+        return 0;
+    }
     uint8_t v0 = data[0];
     if (v0 == 0x05)
     {
-        // int nmethods = data[1];
+        nmethods_ = data[1];
+        if (nmethods_ == 0)
+        {
+            PLOG_WARNING << "socks5 greeting with 0 methods, session_id: " << session_id_;
+            send_socks_reply(0x01);
+            phase_ = Phase::Closed;
+            return 2;
+        }
         phase_ = Phase::WaitSocksMethods;
-        static const uint8_t reply[2] = {0x05, 0x00};
-        tcp_socket_->send(reply, sizeof(reply));
+        return 2;
     }
     else
     {
         // 明文 HTTP：这2个字节本身就是请求的一部分，留给 http parser
         phase_ = Phase::WaitHttpRequestHeaders;
+        return 0; // 一个字节都不消费，整段转交 http 解析器
     }
-
-    return 2;
 }
 
 size_t Socks5Session::handle_socks_methods(const uint8_t *data, size_t len)
 {
+    // METHODS(NMETHODS)：只支持 0x00（无认证）
+    if (len < nmethods_)
+    {
+        return 0;
+    }
+    bool no_auth_offered = false;
+    for (uint8_t i = 0; i < nmethods_; i++)
+    {
+        if (data[i] == 0x00)
+        {
+            no_auth_offered = true;
+            break;
+        }
+    }
+
+    if (!no_auth_offered)
+    {
+        PLOG_WARNING << "client offered no supported auth method, session_id: " << session_id_;
+        static const uint8_t no_accept[2] = {0x05, 0xFF};
+        tcp_socket_->send(no_accept, sizeof(no_accept));
+        phase_ = Phase::Closed;
+        return nmethods_;
+    }
+
+    static const uint8_t reply[2] = {0x05, 0x00};
+    tcp_socket_->send(reply, sizeof(reply));
+    phase_ = Phase::WaitSocksTCP;
+    return nmethods_;
+}
+
+size_t Socks5Session::handle_socks_tcp_udp(const uint8_t *data, size_t len)
+{
+    // 请求头: VER(1) CMD(1) RSV(1) ATYP(1)
+    if (len < 4)
+    {
+        return 0;
+    }
     uint8_t cmd = data[1];
+    uint8_t atyp = data[3];
 
     if (cmd == 0x01)
     {
         PLOG_DEBUG << "SOCKS5 connect request received, session_id: " << session_id_;
-        phase_ = Phase::WaitSocksTCP;
         protocol_ = Protocol::Socks5Connect;
     }
     else if (cmd == 0x03)
     {
-        PLOG_DEBUG << "SOCKS5 UDP request received, session_id: " << session_id_;
-        phase_ = Phase::WaitSocksUDP;
+        PLOG_DEBUG << "SOCKS5 udp associate request received, session_id: " << session_id_;
         protocol_ = Protocol::UdpAssociate;
     }
     else
     {
         PLOG_WARNING << "invalid command: " << static_cast<int>(cmd);
-        phase_ = Phase::Closed;
         send_socks_reply(0x07);
-        return 1;
+        phase_ = Phase::Closed;
+        return 4;
     }
-    return 2;
-}
 
-size_t Socks5Session::handle_socks_tcp_udp(const uint8_t *data, size_t len)
-{
-    PLOG_DEBUG << "SOCKS5 connect request IPv4 address received, session_id: " << session_id_;
-    uint8_t atyp = data[3];
     if (atyp == 0x01)
+    {
         phase_ = Phase::WaitSocksIpv4;
+    }
     else if (atyp == 0x03)
+    {
         phase_ = Phase::WaitSocksDomain;
+    }
     else
     {
+        PLOG_WARNING << "unsupported address type: " << static_cast<int>(atyp);
         send_socks_reply(0x08);
         phase_ = Phase::Closed;
+        return 4;
     }
-    return 2;
+    return 4;
 }
 
 size_t Socks5Session::handle_socks_ipv4(const uint8_t *data, size_t len)
 {
-    PLOG_DEBUG << "SOCKS5 connect request IPv4 address received, session_id: " << session_id_;
+    // ADDR(4) + PORT(2)
+    if (len < 6)
+    {
+        return 0;
+    }
     char tmp[32];
-    std::snprintf(tmp, sizeof(tmp), "%d.%d.%d.%d", data[4], data[5],
-                  data[6], data[7]);
+    std::snprintf(tmp, sizeof(tmp), "%d.%d.%d.%d", data[0], data[1],
+                  data[2], data[3]);
     target_host_ = tmp;
-    target_port_ = (uint16_t(data[8]) << 8) | data[9];
+    target_port_ = (uint16_t(data[4]) << 8) | data[5];
     PLOG_DEBUG << "SOCKS5 connect request IPv4 address: " << target_host_ << ", port: " << target_port_ << ", session_id: " << session_id_;
     request_remote_connect();
     return 6;
@@ -317,14 +402,22 @@ size_t Socks5Session::handle_socks_ipv4(const uint8_t *data, size_t len)
 
 size_t Socks5Session::handle_socks_domain(const uint8_t *data, size_t len)
 {
-    PLOG_DEBUG << "SOCKS5 connect request domain name length received, session_id: " << session_id_;
-    int domain_len = data[4];
-    target_host_.assign(data + 5, data + 5 + domain_len);
+    // LEN(1) + DOMAIN(LEN) + PORT(2)
+    if (len < 1)
+    {
+        return 0;
+    }
+    uint8_t domain_len = data[0];
+    if (len < static_cast<size_t>(domain_len) + 3)
+    {
+        return 0;
+    }
+    target_host_.assign(reinterpret_cast<const char *>(data) + 1, domain_len);
     target_port_ =
-        (uint16_t(data[domain_len + 5]) << 8) | data[domain_len + 6];
+        (uint16_t(data[1 + domain_len]) << 8) | data[2 + domain_len];
     PLOG_DEBUG << "SOCKS5 connect request domain name: " << target_host_ << ", port: " << target_port_ << ", session_id: " << session_id_;
     request_remote_connect();
-    return 3 + domain_len;
+    return static_cast<size_t>(domain_len) + 3;
 }
 
 void Socks5Session::http_connected(bool ok)
@@ -366,12 +459,21 @@ void Socks5Session::udp_connected(bool ok)
     }
     if (!udp_session_)
     {
-        udp_session_ = std::make_shared<UdpSession>(io_, mux_, session_id_);
-        if (!udp_session_->start())
-        {
-            send_socks_reply(0x01);
-            return;
-        }
+        // 注意：UdpSession 收发都用 mux 的 stream_id；必须用本次 SYN 使用的
+        // session_->stream_id()，而不是 SOCKS5 会话计数器 id，否则对端按
+        // stream_id 分发时找不到会话，UDP 数据会被静默丢弃
+        udp_session_ = std::make_shared<UdpSession>(io_, mux_, session_->stream_id());
+        auto self(shared_from_this());
+        // 套接字 open+bind 完成后才能应答（端口才确定）
+        udp_session_->start([self](bool open_ok, int port)
+                            {
+                                if (!open_ok)
+                                {
+                                    self->send_socks_reply(0x01);
+                                    return;
+                                }
+                                self->send_udp_reply(self->udp_session_->get_local_ip(), port); });
+        return;
     }
 
     send_udp_reply(udp_session_->get_local_ip(), udp_session_->getLocalPort());
@@ -483,6 +585,12 @@ void Socks5Session::p2p_synack(bool ok, Protocol protocol)
     else
     {
         phase_ = Phase::Connected;
+        // 请求与首包数据在同一 TCP 段到达时，数据已在握手期间攒下，这里补发
+        if (protocol_ == Protocol::Socks5Connect && !socks_pending_.empty())
+        {
+            mux_.send_data(session_->stream_id(), socks_pending_.data(), socks_pending_.size(), protocol_);
+        }
+        socks_pending_.clear();
     }
 }
 

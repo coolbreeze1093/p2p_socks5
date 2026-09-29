@@ -1,102 +1,168 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+SOCKS5 UDP ASSOCIATE + DNS relay test.
+
+Works against any SOCKS5 endpoint of this project:
+  - old client  (config.ini [socks5] bind_port, default 10801)
+  - new rtcsocks CLI pair (default 10801, start both rtcsocks/rtcsocks-exit first)
+
+Usage:
+  python test/socket5_udp_test.py [socks5_port]
+
+Steps:
+  1. TCP control channel: method negotiation (NO AUTH) -> UDP ASSOCIATE
+  2. Send a DNS A query for www.baidu.com to 114.114.114.114:53
+     through the SOCKS5 UDP relay
+  3. Verify the DNS response round-trips with a matching transaction id
+"""
+
+import random
 import socket
 import struct
-import random
+import sys
+
+SOCKS5_HOST = "127.0.0.1"
+SOCKS5_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 10801
+
+DNS_SERVER = "114.114.114.114"
+DNS_PORT = 53
+DNS_DOMAIN = "www.baidu.com"
+
+TCP_TIMEOUT = 5.0
+UDP_TIMEOUT = 8.0
+
 
 def socks5_udp_associate(socks_host, socks_port):
-    # 1. TCP 连接建立控制通道
+    """Open the TCP control channel and run greeting + UDP ASSOCIATE.
+
+    Returns (tcp_sock, relay_host, relay_port).
+    """
     tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcp_sock.settimeout(TCP_TIMEOUT)
     tcp_sock.connect((socks_host, socks_port))
-    
-    # 2. 握手，无认证
-    tcp_sock.send(b'\x05\x01\x00')
+
+    # 1. greeting: VER=5, NMETHODS=1, METHOD=0 (NO AUTH)
+    tcp_sock.sendall(b"\x05\x01\x00")
     resp = tcp_sock.recv(2)
-    assert resp == b'\x05\x00', f"握手失败: {resp}"
-    
-    # 3. 发送 UDP ASSOCIATE 请求
-    # VER=5, CMD=3(UDP ASSOCIATE), RSV=0, ATYP=1(IPv4), ADDR=0.0.0.0, PORT=0
-    req = b'\x05\x03\x00\x01' + socket.inet_aton('0.0.0.0') + struct.pack('>H', 0)
-    tcp_sock.send(req)
-    resp = tcp_sock.recv(10)
-    
-    ver, rep, rsv, atyp = resp[0], resp[1], resp[2], resp[3]
-    assert rep == 0, f"UDP ASSOCIATE 失败, rep={rep}"
-    
-    bnd_addr = socket.inet_ntoa(resp[4:8])
-    bnd_port = struct.unpack('>H', resp[8:10])[0]
-    print(f"服务器分配的 UDP relay 地址: {bnd_addr}:{bnd_port}")
-    
+    if resp != b"\x05\x00":
+        raise RuntimeError(f"greeting failed: {resp.hex()}")
+
+    print(f"[1] greeting ok: {resp.hex()}")
+
+    # 2. UDP ASSOCIATE: VER=5, CMD=3, RSV=0, ATYP=1, 0.0.0.0:0
+    req = b"\x05\x03\x00\x01" + socket.inet_aton("0.0.0.0") + struct.pack(">H", 0)
+    tcp_sock.sendall(req)
+
+    header = tcp_sock.recv(4)
+    if len(header) < 4:
+        raise RuntimeError(f"UDP ASSOCIATE reply too short: {header.hex()}")
+
+    ver, rep, _rsv, atyp = header[0], header[1], header[2], header[3]
+    if ver != 0x05:
+        raise RuntimeError(f"bad reply version: 0x{ver:02x}")
+    if rep != 0x00:
+        raise RuntimeError(f"UDP ASSOCIATE failed, rep=0x{rep:02x}")
+
+    # BND.ADDR / BND.PORT
+    if atyp == 0x01:
+        bnd_addr = socket.inet_ntoa(tcp_sock.recv(4))
+    elif atyp == 0x03:
+        n = tcp_sock.recv(1)[0]
+        bnd_addr = tcp_sock.recv(n).decode()
+    elif atyp == 0x04:
+        bnd_addr = socket.inet_ntop(socket.AF_INET6, tcp_sock.recv(16))
+    else:
+        raise RuntimeError(f"unsupported ATYP in reply: 0x{atyp:02x}")
+
+    bnd_port = struct.unpack(">H", tcp_sock.recv(2))[0]
+
+    # RFC 1928: 0.0.0.0 means "use the address the request came from"
+    if bnd_addr in ("0.0.0.0", "::"):
+        bnd_addr = socks_host
+        print(f"[2] relay is wildcard, using {bnd_addr}")
+
+    print(f"[2] UDP relay: {bnd_addr}:{bnd_port}")
     return tcp_sock, bnd_addr, bnd_port
 
-def send_udp_via_socks5(bnd_addr, bnd_port, target_host, target_port, payload):
-    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    # 封装 SOCKS5 UDP 头部
-    # RSV(2)=0x0000, FRAG(1)=0x00, ATYP(1)=0x01(IPv4), DST.ADDR(4), DST.PORT(2)
-    header = b'\x00\x00\x00\x01' + socket.inet_aton(target_host) + struct.pack('>H', target_port)
-    packet = header + payload
-    
-    udp_sock.sendto(packet, (bnd_addr, bnd_port))
-    
-    # 接收响应（如果目标是 echo 服务器之类）
-    udp_sock.settimeout(3)
-    try:
-        data, addr = udp_sock.recvfrom(4096)
-        print(f"收到响应 from {addr}: {data}")
-        # 响应也会带 SOCKS5 UDP 头部，需要解析
-        # 跳过头部（同样是4字节固定头+4字节IPv4+2字节端口=10字节）
-        resp_payload = data[10:]
-        print(f"实际负载: {resp_payload}")
-    except socket.timeout:
-        print("超时，没收到响应")
-    
-    udp_sock.close()
 
-
-def build_dns_query(domain: str, qtype: int = 1) -> bytes:
-    """
-    构造一个标准 DNS 查询报文
-    qtype: 1 = A 记录, 28 = AAAA 记录, 5 = CNAME, 15 = MX, 16 = TXT ...
-    """
-    # ---- Header (12 字节) ----
+def build_dns_query(domain):
+    """Build a standard DNS A query with a random transaction id."""
     transaction_id = random.randint(0, 0xFFFF)
-    flags = 0x0100          # 标准查询，递归期望(RD=1)
-    questions = 1
-    answer_rrs = 0
-    authority_rrs = 0
-    additional_rrs = 0
 
-    header = struct.pack(
-        '>HHHHHH',
-        transaction_id, flags, questions,
-        answer_rrs, authority_rrs, additional_rrs
-    )
+    qname = b""
+    for label in domain.strip(".").split("."):
+        encoded = label.encode("ascii")
+        qname += struct.pack("B", len(encoded)) + encoded
+    qname += b"\x00"
 
-    # ---- Question 部分 ----
-    # 域名需要编码成 "长度前缀 label" 格式，例如:
-    # www.baidu.com -> 03 www 05 baidu 03 com 00
-    qname = b''
-    for label in domain.strip('.').split('.'):
-        label_bytes = label.encode('ascii')
-        qname += struct.pack('B', len(label_bytes)) + label_bytes
-    qname += b'\x00'   # 结尾 0 字节
+    header = struct.pack(">HHHHHH", transaction_id, 0x0100, 1, 0, 0, 0)
+    question = qname + struct.pack(">HH", 1, 1)  # QTYPE=A, QCLASS=IN
 
-    qclass = 1  # IN (Internet)
-    question = qname + struct.pack('>HH', qtype, qclass)
-
-    return header + question
+    return transaction_id, header + question
 
 
-# 示例
+def send_dns_via_socks5(relay_host, relay_port, target_host, target_port, payload):
+    """Send payload through the SOCKS5 UDP relay, return (addr, response payload)."""
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.settimeout(UDP_TIMEOUT)
+    try:
+        # SOCKS5 UDP header: RSV(2)=0, FRAG(1)=0, ATYP(1)=1, ADDR(4), PORT(2)
+        header = b"\x00\x00\x00\x01" + socket.inet_aton(target_host) + struct.pack(">H", target_port)
+        udp_sock.sendto(header + payload, (relay_host, relay_port))
+
+        data, addr = udp_sock.recvfrom(4096)
+
+        print(f"[4] reply from {addr[0]}:{addr[1]}, {len(data)} bytes")
+
+        # strip the SOCKS5 UDP header (10 bytes for an IPv4 source)
+        return addr, data[10:]
+    finally:
+        udp_sock.close()
 
 
-if __name__ == '__main__':
-    # 修改成你的 SOCKS5 服务器地址
-    tcp_sock, bnd_addr, bnd_port = socks5_udp_associate('127.0.0.1', 10800)
+def main():
+    print("SOCKS5 UDP relay test")
+    print(f"  endpoint : {SOCKS5_HOST}:{SOCKS5_PORT}")
+    print(f"  dns      : {DNS_SERVER}:{DNS_PORT} ({DNS_DOMAIN})")
+    print()
 
-    dns_query = build_dns_query('www.baidu.com', qtype=1)
-    print(dns_query.hex())
-    
-    # 测试发送到一个 UDP echo 服务器（比如你自己搭一个）
-    send_udp_via_socks5(bnd_addr, bnd_port, '114.114.114.114', 53, dns_query)  # 示例DNS查询
-    
-    tcp_sock.close()
+    tcp_sock, relay_host, relay_port = socks5_udp_associate(SOCKS5_HOST, SOCKS5_PORT)
+    try:
+        transaction_id, dns_query = build_dns_query(DNS_DOMAIN)
+        print(f"[3] DNS query sent, tid=0x{transaction_id:04x}, {len(dns_query)} bytes")
+
+        addr, dns_response = send_dns_via_socks5(
+            relay_host, relay_port, DNS_SERVER, DNS_PORT, dns_query
+        )
+
+        if addr[0] != relay_host or addr[1] != relay_port:
+            raise RuntimeError(f"reply from unexpected source {addr}")
+
+        if len(dns_response) < 2:
+            raise RuntimeError("DNS response too short")
+
+        resp_tid = struct.unpack(">H", dns_response[:2])[0]
+        if resp_tid != transaction_id:
+            raise RuntimeError(
+                f"DNS transaction id mismatch: sent 0x{transaction_id:04x}, got 0x{resp_tid:04x}"
+            )
+
+        rcode = dns_response[3] & 0x0F
+        print(f"[5] DNS response ok, tid match, rcode={rcode}, {len(dns_response)} bytes")
+        print("PASSED")
+    finally:
+        tcp_sock.close()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except socket.timeout:
+        print("FAILED: timeout (no response through the UDP relay)")
+        print("  - is the P2P tunnel actually connected?")
+        print("  - did UDP ASSOCIATE succeed on the exit side?")
+        sys.exit(1)
+    except Exception as e:
+        print(f"FAILED: {type(e).__name__}: {e}")
+        sys.exit(1)

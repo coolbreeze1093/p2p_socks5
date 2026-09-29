@@ -156,7 +156,9 @@ private:
 
         const std::string line = oss.str();
         file_ << line << '\n';
+        file_.flush();
         std::cout << line << '\n';
+        std::cout.flush();
     }
 
     moodycamel::ConcurrentQueue<Entry> queue_;

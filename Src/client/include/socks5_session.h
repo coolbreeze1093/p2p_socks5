@@ -1,4 +1,8 @@
-#pragma once
+﻿#pragma once
+// 2026-09 修复 SOCKS5 握手解析缺陷（详见 socks5_session.cpp 顶部说明）：
+//   - consume_pending 改为滚动偏移消费，不再从"块首绝对偏移"读字段
+//   - 新增 socks_pending_ 跨包缓冲：一个握手步骤分多个 TCP 段到达也能正确解析
+//   - 新增 nmethods_ 记录问候包中的认证方法数
 #include <asio.hpp>
 #include <deque>
 #include <iostream>
@@ -27,7 +31,8 @@ public:
 
 private:
     void process_data(const uint8_t *data, size_t len);
-    void consume_pending(const uint8_t *data, size_t len);
+    // 返回本次消费掉的字节数（数据不足返回 0，等待下一包）
+    size_t consume_pending(const uint8_t *data, size_t len);
     size_t handle_greeting_version(const uint8_t *data, size_t len);
     size_t handle_socks_methods(const uint8_t *data, size_t len);
     size_t handle_socks_tcp_udp(const uint8_t *data, size_t len);
@@ -84,4 +89,8 @@ private:
     bool is_closed_ = false;
 
     bool is_p2p_closed_ = false;
+
+    // ---- SOCKS5 握手解析修复新增 ----
+    uint8_t nmethods_ = 0;                // 问候包中的认证方法数
+    std::vector<uint8_t> socks_pending_;  // 握手阶段未消费完的字节（跨包缓冲）
 };

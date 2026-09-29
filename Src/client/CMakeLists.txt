@@ -4,7 +4,7 @@ project(client LANGUAGES C CXX)
 
 add_executable(client
     src/main.cpp
-    src/tcp_session.cpp
+    src/socks5_session.cpp
     src/udp_session.cpp
     src/socks5.cpp
     src/network_rtc_app.cpp

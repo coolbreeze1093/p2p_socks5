@@ -123,6 +123,46 @@ export http_proxy="socks5://127.0.0.1:1080"
 export https_proxy="socks5://127.0.0.1:1080"
 ```
 
+## 命令行版（无信令，手动交换 SDP）
+
+`Src/cli` 下有一对**独立的命令行程序**，不依赖 WebSocket 信令服务器：双方在命令行
+手动交换 WebRTC SDP（base64 单行文本）即可建立 P2P，之后本地 SOCKS5 的 TCP/UDP
+流量通过 P2P 数据通道由出口端转发。与旧的 `client`/`server` 完全独立、互不影响。
+
+### 组件
+
+| 程序 | 角色 | 说明 |
+| --- | --- | --- |
+| `rtcsocks` | 本地端（offerer） | 生成 OFFER；P2P 建立后监听本地 SOCKS5 |
+| `rtcsocks-exit` | 出口端（answerer） | 粘贴 OFFER 生成 ANSWER；真正对目标发起 TCP/UDP 连接 |
+
+### 交互式用法
+
+```bash
+# 出口端机器上
+./rtcsocks-exit
+# 粘贴客户端的 OFFER 后回车 -> 打印 ANSWER，发回给客户端
+
+# 本地机器上
+./rtcsocks
+# 打印 OFFER，发给出口端；把出口端返回的 ANSWER 整块粘贴回来
+# 显示 "P2P connected" 后即可使用 socks5://127.0.0.1:10801
+```
+
+脚本/免粘贴场景可用文件交换：客户端 `--offer-file` 写出 OFFER、`--answer-file`
+轮询读取 ANSWER；出口端 `--offer-file` 读 OFFER、`--answer-file` 写 ANSWER。
+
+### 常用选项
+
+```bash
+./rtcsocks -l 1080                          # 指定本地 SOCKS5 端口（默认 10801）
+./rtcsocks -S stun.example.com:3478         # 跨 NAT 时两端都要指定 STUN（同网段可省略）
+./rtcsocks-exit --log-level debug           # 日志级别 verbose|debug|info|warning|error|none
+```
+
+`-h/--help` 查看完整选项。SDP 只交换一次，连接断开后需重新交换；SDP 本身即是
+连接凭证，请勿泄露。
+
 ## 核心模块
 
 ### SOCKS5 协议实现
@@ -171,8 +211,8 @@ export https_proxy="socks5://127.0.0.1:1080"
 项目中包含 Python 测试脚本：
 
 ```bash
-# SOCKS5 UDP 测试
-python test/socket5_udp_test.py
+# SOCKS5 UDP 测试（可选传入 SOCKS5 端口，默认 10801，对旧 client 与新 rtcsocks 均适用）
+python test/socket5_udp_test.py [port]
 
 # UDP 功能测试
 python test/udp_test.py

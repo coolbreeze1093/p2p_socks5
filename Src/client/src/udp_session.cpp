@@ -28,7 +28,7 @@ void UdpSession::close()
     }
 }
 
-bool UdpSession::start()
+void UdpSession::start(std::function<void(bool success, int port)> on_ready)
 {
     auto self = shared_from_this();
     socket_->setCloseCallback([this,self]()
@@ -57,7 +57,7 @@ bool UdpSession::start()
             }
         send_p2p_data(d, n); });
     socket_->setWriteQueueCallback([this,self](p2psocks::WriteQueueStatus queue)
-                                   { 
+                                   {
                                     p2psocks::CtrlType type = p2psocks::CtrlType::pause;
                                     if(queue == p2psocks::WriteQueueStatus::Danger)
                                     {
@@ -68,11 +68,21 @@ bool UdpSession::start()
                                         type = p2psocks::CtrlType::receive;
                                     }
                                     mux_.send_data_ctrl(session_id_, type, protocol_); });
-    socket_->setOpenCallback([this,self](bool success)
-                                { mux_.send_synack(session_id_,success, protocol_); });
+    // open+bind 完成后（在 strand 内）才回调，此时取端口是安全的；
+    // 原实现在 start() 返回后立刻 getLocalPort()，与异步打开存在竞态，
+    // 会抛异常且被 libdatachannel 回调静默吞掉，导致 UDP ASSOCIATE 无应答
+    socket_->setOpenCallback([this, self, on_ready](bool success)
+                             {
+                                 int port = -1;
+                                 if (success)
+                                 {
+                                     PLOG_DEBUG << "UDP server listening on port "
+                                                << socket_->getLocalPort()
+                                                << ", session_id: " << session_id_;
+                                     port = socket_->getLocalPort();
+                                 }
+                                 on_ready(success, port); });
     socket_->start();
-    PLOG_DEBUG << "UDP server listening on port " << socket_->getLocalPort() << ", session_id: " << session_id_;
-    return true;
 }
 
 void UdpSession::revP2pData(const uint8_t *d, size_t n)
