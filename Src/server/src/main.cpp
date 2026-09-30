@@ -42,14 +42,14 @@ void input_keyboard()
 
 int main(int argc, char *argv[])
 {
-    RtcLogger::instance().init("rtc_server.log");
+    RtcLogger::instance().init("rtc_server.log",true);
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
     rtc::InitLogger(rtc::LogLevel::Debug, rtcLogCallback);
     PLOG_INFO << "RTC WebRTC C++ Server Started";
     ServerConfig server_config;
     auto exec_dir = getExecutableDir();
-    ServerConfig::readConfig(server_config, exec_dir.string() + "/" + "config.ini");
+    ServerConfig::readConfig(server_config, exec_dir.string() + "/" + "config_server.ini");
 
     try
     {

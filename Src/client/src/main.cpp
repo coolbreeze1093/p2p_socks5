@@ -47,7 +47,7 @@ int main(int argc, char *argv[])
     CrashDump::InstallCrashHandler("");
 
     auto exec_dir = getExecutableDir();
-    RtcLogger::instance().init("rtc_client.log");
+    RtcLogger::instance().init("rtc_client.log",true);
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
@@ -57,7 +57,7 @@ int main(int argc, char *argv[])
 
     uint32_t peer_conn_id = 1;
     ClientConfig config;
-    ClientConfig::readClientConfig(config, exec_dir.string() + "/" + "config.ini");
+    ClientConfig::readClientConfig(config, exec_dir.string() + "/" + "config_client.ini");
 
     asio::io_context io;
     // 防止 io.run() 因为暂时没有任务而直接退出

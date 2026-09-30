@@ -161,12 +161,12 @@ struct ClientConfig
             // ============================================================
             // 保存
             // ============================================================
-            SI_Error status = ini.SaveFile("config.ini");
+            SI_Error status = ini.SaveFile(exec_dir.c_str());
 
             if (status != SI_OK)
             {
                 PLOG_ERROR
-                    << "create default config.ini failed, status="
+                    << "create default config_client.ini failed, status="
                     << status;
                 return;
             }
